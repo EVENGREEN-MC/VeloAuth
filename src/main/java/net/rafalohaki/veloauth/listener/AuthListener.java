@@ -28,14 +28,16 @@ import org.slf4j.Logger;
 import org.slf4j.Marker;
 import org.slf4j.MarkerFactory;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.inject.Inject;
 import java.net.InetAddress;
 import java.net.SocketAddress;
+import java.time.Duration;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import net.rafalohaki.veloauth.model.CachedAuthUser;
 import net.rafalohaki.veloauth.cache.AuthCache.PremiumCacheEntry;
 
@@ -69,8 +71,13 @@ public class AuthListener {
     private static final Marker AUTH_MARKER = MarkerFactory.getMarker("AUTH");
     private static final Marker SECURITY_MARKER = MarkerFactory.getMarker("SECURITY");
 
-    // Guard against duplicate concurrent PreLogin events from the same login source
-    private final ConcurrentHashMap<String, Boolean> pendingLogins = new ConcurrentHashMap<>();
+    // Guard against duplicate concurrent PreLogin events from the same (username|ip) pair.
+    // Caffeine-bounded so a flood of malformed PreLogins cannot grow this unbounded — TTL
+    // covers Velocity's own PreLogin timeout (~30 s); size cap prevents memory pressure.
+    private final Cache<String, Boolean> pendingLogins = Caffeine.newBuilder()
+            .maximumSize(10_000)
+            .expireAfterWrite(Duration.ofSeconds(30))
+            .build();
 
     private final VeloAuth plugin;
     private final AuthCache authCache;
@@ -201,7 +208,7 @@ public class AuthListener {
             logger.debug("PreLogin: {}", username);
         }
 
-        if (pendingLogins.putIfAbsent(pendingLoginKey, Boolean.TRUE) != null) {
+        if (pendingLogins.asMap().putIfAbsent(pendingLoginKey, Boolean.TRUE) != null) {
             logger.warn(SECURITY_MARKER, "[DUPLICATE PRELOGIN] {} from {} - already connecting, denying",
                     username, pendingLoginKey);
             event.setResult(PreLoginEvent.PreLoginComponentResult.denied(
@@ -210,19 +217,19 @@ public class AuthListener {
         }
 
         if (!validatePreLoginConditions(event, username)) {
-            pendingLogins.remove(pendingLoginKey);
+            pendingLogins.invalidate(pendingLoginKey);
             return null;
         }
 
         if (!settings.isPremiumCheckEnabled()) {
             logger.debug("Premium check disabled in config - forcing offline mode for {}", username);
             event.setResult(PreLoginEvent.PreLoginComponentResult.forceOfflineMode());
-            pendingLogins.remove(pendingLoginKey);
+            pendingLogins.invalidate(pendingLoginKey);
             return null;
         }
 
         return EventTask.resumeWhenComplete(handlePremiumDetectionAsync(event, username)
-                .whenComplete((result, throwable) -> pendingLogins.remove(pendingLoginKey)));
+                .whenComplete((result, throwable) -> pendingLogins.invalidate(pendingLoginKey)));
     }
 
     private String createPendingLoginKey(PreLoginEvent event, String username) {

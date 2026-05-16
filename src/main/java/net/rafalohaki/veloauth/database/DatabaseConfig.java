@@ -94,9 +94,6 @@ public final class DatabaseConfig {
     private final String jdbcUrl;
 
     /**
-     * Private constructor for use with Builder pattern.
-     */
-    /**
      * Internal parameter carrier used to reduce constructor parameter count and
      * satisfy complexity rules. This record is private and only used by factory methods.
      */

@@ -91,8 +91,31 @@ class RegisterCommand implements SimpleCommand {
             ctx.sendCommandInProgress(player);
             return;
         }
+        InetAddress playerAddress = PlayerAddressUtils.getPlayerAddress(player);
+        // Fail-closed when we can't identify the IP and IP-limiting is enabled. Without an
+        // InetAddress we cannot acquire the per-IP lock that closes the TOCTOU on
+        // `ip-limit-registrations`; allowing the register to proceed would let two concurrent
+        // null-address registers both bypass the cap. Null addresses are rare (buggy upstream
+        // proxy / non-standard transport); the operator can disable ip-limit-registrations
+        // if they accept that risk.
+        if (playerAddress == null && ctx.settings().getIpLimitRegistrations() > 0) {
+            ctx.logger().warn(DB_MARKER,
+                    "Refusing registration of {} — cannot resolve remote IP (ip-limit-registrations enabled)",
+                    player.getUsername());
+            player.sendMessage(ctx.sm().bruteForceBlocked());
+            ctx.releaseCommandLock(player.getUniqueId());
+            return;
+        }
+        // Close the TOCTOU window on ip-limit-registrations: serialize concurrent /register
+        // from the same IP. Without this gate, two parallel registers could both observe
+        // count < limit and both succeed, exceeding the configured ceiling.
+        boolean ipLockAcquired = playerAddress != null && ctx.tryAcquireRegistrationLock(playerAddress);
+        if (playerAddress != null && !ipLockAcquired) {
+            ctx.sendCommandInProgress(player);
+            ctx.releaseCommandLock(player.getUniqueId());
+            return;
+        }
         try {
-            InetAddress playerAddress = PlayerAddressUtils.getPlayerAddress(player);
             if (playerAddress != null && ctx.ipRateLimiter().isRateLimited(playerAddress)) {
                 player.sendMessage(ctx.sm().bruteForceBlocked());
                 return;
@@ -108,7 +131,7 @@ class RegisterCommand implements SimpleCommand {
                 return;
             }
 
-            // Check IP registration limit
+            // Check IP registration limit (now inside the per-IP lock — no TOCTOU race).
             String playerIp = PlayerAddressUtils.getPlayerIp(authContext.player());
             long ipCount = ctx.databaseManager().countRegistrationsByIp(playerIp).join();
             if (ipCount >= ctx.settings().getIpLimitRegistrations()) {
@@ -149,6 +172,9 @@ class RegisterCommand implements SimpleCommand {
             ctx.sendDatabaseErrorMessage(player);
         } finally {
             ctx.releaseCommandLock(player.getUniqueId());
+            if (ipLockAcquired) {
+                ctx.releaseRegistrationLock(playerAddress);
+            }
         }
     }
 }

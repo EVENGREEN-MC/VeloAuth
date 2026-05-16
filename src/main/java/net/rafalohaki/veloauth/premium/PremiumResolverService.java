@@ -16,11 +16,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 /**
@@ -39,6 +40,13 @@ public class PremiumResolverService {
     private static final Pattern VALID_USERNAME = Pattern.compile("^\\w{3,16}$");
     private static final String RESOLVER_SERVICE = "resolver-service";
     private static final Marker PREMIUM_MARKER = MarkerFactory.getMarker("PREMIUM");
+
+    /** Resolver ID treated as authoritative for OFFLINE classification. Must match
+     *  {@link ResolverConfig#MOJANG}{@code .id()} — that resolver is the single source of
+     *  truth for "this name exists / does not exist as a premium account". Other resolvers
+     *  (Ashcon, wpme) are mirrors and can be stale or partial, so their OFFLINE alone is
+     *  weaker evidence. See {@link #selectBestResult} for the decision rule. */
+    static final String AUTHORITATIVE_RESOLVER_ID = "mojang";
 
     private final Logger logger;
     private final PremiumUuidDao dao; // Renamed to avoid conflict with class name
@@ -186,38 +194,33 @@ public class PremiumResolverService {
     }
 
     private ResolverResults executeResolversInParallel(List<PremiumResolver> enabledResolvers, String trimmed) {
-        AtomicReference<PremiumResolution> premiumResult = new AtomicReference<>();
-        AtomicReference<PremiumResolution> offlineCandidate = new AtomicReference<>();
-        java.util.concurrent.atomic.AtomicInteger unknownCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        ConcurrentHashMap<String, PremiumResolution> byResolver = new ConcurrentHashMap<>();
 
-        List<CompletableFuture<PremiumResolution>> futures = enabledResolvers.stream()
-                .map(resolver -> createResolverFuture(resolver, trimmed, premiumResult, offlineCandidate, unknownCount))
+        List<CompletableFuture<Void>> futures = enabledResolvers.stream()
+                .map(resolver -> createResolverFuture(resolver, trimmed, byResolver))
                 .toList();
 
         awaitResolverFutures(futures);
-        return new ResolverResults(premiumResult.get(), offlineCandidate.get(), unknownCount.get() > 0);
+        return new ResolverResults(Map.copyOf(byResolver));
     }
 
-    private CompletableFuture<PremiumResolution> createResolverFuture(
+    private CompletableFuture<Void> createResolverFuture(
             PremiumResolver resolver, String trimmed,
-            AtomicReference<PremiumResolution> premiumResult,
-            AtomicReference<PremiumResolution> offlineCandidate,
-            java.util.concurrent.atomic.AtomicInteger unknownCount) {
-        return CompletableFuture.supplyAsync(
-                () -> executeResolver(resolver, trimmed, premiumResult, offlineCandidate, unknownCount),
+            ConcurrentHashMap<String, PremiumResolution> byResolver) {
+        return CompletableFuture.runAsync(
+                () -> {
+                    PremiumResolution resolution = executeResolver(resolver, trimmed);
+                    byResolver.put(resolver.id(), resolution);
+                },
                 net.rafalohaki.veloauth.util.VirtualThreadExecutorProvider.getVirtualExecutor()
         );
     }
 
-    private PremiumResolution executeResolver(
-            PremiumResolver resolver, String trimmed,
-            AtomicReference<PremiumResolution> premiumResult,
-            AtomicReference<PremiumResolution> offlineCandidate,
-            java.util.concurrent.atomic.AtomicInteger unknownCount) {
+    private PremiumResolution executeResolver(PremiumResolver resolver, String trimmed) {
         try {
             PremiumResolution rawResolution = resolver.resolve(trimmed);
             PremiumResolution resolution = normalizeResolution(resolver, rawResolution, trimmed);
-            categorizeResolution(resolver, resolution, trimmed, premiumResult, offlineCandidate, unknownCount);
+            logResolution(resolver, trimmed, resolution);
             // API responded (premium or offline) = success; unknown = treated as failure for alerting
             recordAlertMetric(resolver.id(), !resolution.isUnknown());
             return resolution;
@@ -234,28 +237,17 @@ public class PremiumResolverService {
         }
     }
 
-    private void categorizeResolution(
-            PremiumResolver resolver, PremiumResolution resolution, String trimmed,
-            AtomicReference<PremiumResolution> premiumResult,
-            AtomicReference<PremiumResolution> offlineCandidate,
-            java.util.concurrent.atomic.AtomicInteger unknownCount) {
-        if (resolution.isPremium()) {
-            premiumResult.compareAndSet(null, resolution);
-            logResolutionResult(resolver, trimmed, "PREMIUM");
-        } else if (resolution.isOffline()) {
-            offlineCandidate.compareAndSet(null, resolution);
-            logResolutionResult(resolver, trimmed, "OFFLINE");
-        } else {
-            unknownCount.incrementAndGet();
-            if (logger.isDebugEnabled()) {
-                logger.debug(PREMIUM_MARKER, "[PARALLEL] {} returned UNKNOWN for {}: {}", resolver.id(), trimmed, resolution.message());
-            }
+    private void logResolution(PremiumResolver resolver, String trimmed, PremiumResolution resolution) {
+        if (!logger.isDebugEnabled()) {
+            return;
         }
-    }
-
-    private void logResolutionResult(PremiumResolver resolver, String trimmed, String status) {
-        if (logger.isDebugEnabled()) {
-            logger.debug(PREMIUM_MARKER, "[PARALLEL] {} returned {} for {}", resolver.id(), status, trimmed);
+        if (resolution.isPremium()) {
+            logger.debug(PREMIUM_MARKER, "[PARALLEL] {} returned PREMIUM for {}", resolver.id(), trimmed);
+        } else if (resolution.isOffline()) {
+            logger.debug(PREMIUM_MARKER, "[PARALLEL] {} returned OFFLINE for {}", resolver.id(), trimmed);
+        } else {
+            logger.debug(PREMIUM_MARKER, "[PARALLEL] {} returned UNKNOWN for {}: {}",
+                    resolver.id(), trimmed, resolution.message());
         }
     }
 
@@ -265,7 +257,7 @@ public class PremiumResolverService {
         }
     }
 
-    private void awaitResolverFutures(List<CompletableFuture<PremiumResolution>> futures) {
+    private void awaitResolverFutures(List<CompletableFuture<Void>> futures) {
         try {
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
                     .orTimeout(5, TimeUnit.SECONDS)
@@ -278,36 +270,139 @@ public class PremiumResolverService {
         }
     }
 
+    /**
+     * Picks the final answer from per-resolver results using a tiered trust policy.
+     *
+     * <h2>Decision rule (in order)</h2>
+     * <ol>
+     *   <li><b>Any PREMIUM</b> → trust immediately. PREMIUM is a positive assertion with a UUID;
+     *       a resolver cannot hallucinate the same UUID Mojang would return, so one confirmation
+     *       is enough. (Cached at full TTL.)</li>
+     *   <li><b>Mojang OFFLINE</b> → trust immediately. Mojang is the authoritative source for
+     *       "this name does not have a premium account"; other resolvers are mirrors.</li>
+     *   <li><b>Mojang silent (UNKNOWN or disabled) + all non-Mojang enabled resolvers OFFLINE</b>
+     *       → trust OFFLINE. Strong consensus from independent mirrors is treated as a quorum
+     *       substitute for Mojang's word.</li>
+     *   <li><b>Mojang silent + any non-Mojang UNKNOWN</b> → return UNKNOWN. Mixing OFFLINE with
+     *       UNKNOWN from another mirror is insufficient evidence; the listener will deny the
+     *       login (fail-closed). This is the case the previous "any OFFLINE wins" logic got
+     *       wrong — it could classify a premium account as OFFLINE when Mojang timed out and
+     *       Ashcon's mirror was stale, opening a name-sniping window.</li>
+     *   <li><b>All resolvers UNKNOWN</b> → return UNKNOWN.</li>
+     * </ol>
+     */
     private PremiumResolution selectBestResult(ResolverResults results, String trimmed) {
-        if (results.premium() != null) {
-            savePremiumToCache(results.premium(), trimmed);
+        PremiumResolution premium = results.firstPremium();
+        if (premium != null) {
+            savePremiumToCache(premium, trimmed);
             if (logger.isInfoEnabled()) {
-                logger.info(PREMIUM_MARKER, "[PARALLEL] Premium confirmed for {} from {}", trimmed, results.premium().source());
+                logger.info(PREMIUM_MARKER, "[PARALLEL] Premium confirmed for {} from {}",
+                        trimmed, premium.source());
             }
-            return results.premium();
+            return premium;
         }
 
-        if (results.offline() != null) {
-            // At least one resolver explicitly confirmed "player not found" (API responded correctly).
-            // Trust that result — UNKNOWN from other resolvers means timeout/rate-limit/error,
-            // NOT that the player might be premium. A premium player would be found by at least
-            // one working resolver. Blocking offline players due to API failures is too strict.
-            if (results.hasUnknown() && logger.isDebugEnabled()) {
-                logger.debug(PREMIUM_MARKER, "[PARALLEL] OFFLINE confirmed for {} (some resolvers returned unknown, but at least one confirmed offline)", trimmed);
-            }
+        PremiumResolution mojang = results.byId(AUTHORITATIVE_RESOLVER_ID);
+        if (mojang != null && mojang.isOffline()) {
             if (logger.isDebugEnabled()) {
-                logger.debug(PREMIUM_MARKER, "[PARALLEL] Player {} resolved as offline", trimmed);
+                logger.debug(PREMIUM_MARKER,
+                        "[PARALLEL] {} resolved as OFFLINE by authoritative resolver ({})",
+                        trimmed, AUTHORITATIVE_RESOLVER_ID);
             }
-            return results.offline();
+            return mojang;
         }
 
-        if (logger.isWarnEnabled()) {
-            logger.warn(PREMIUM_MARKER, "[PARALLEL] All resolvers returned unknown for {} - possible API issues", trimmed);
+        // Mojang silent (UNKNOWN or disabled). Quorum fallback: trust OFFLINE only if every
+        // non-Mojang enabled resolver also said OFFLINE. Any UNKNOWN from a mirror voids the
+        // quorum because a stale/down mirror cannot disprove premium status on its own.
+        List<PremiumResolution> nonMojang = results.nonAuthoritativeResults();
+        boolean haveQuorum = !nonMojang.isEmpty()
+                && nonMojang.stream().allMatch(PremiumResolution::isOffline);
+        if (haveQuorum) {
+            PremiumResolution offline = nonMojang.get(0);
+            if (logger.isDebugEnabled()) {
+                logger.debug(PREMIUM_MARKER,
+                        "[PARALLEL] {} resolved as OFFLINE by mirror quorum ({} resolvers agreed)",
+                        trimmed, nonMojang.size());
+            }
+            return offline;
         }
-        return PremiumResolution.unknown(RESOLVER_SERVICE, "all resolvers failed");
+
+        logQuorumFailure(results, trimmed);
+        return PremiumResolution.unknown(RESOLVER_SERVICE,
+                "no quorum: mojang=" + statusLabel(mojang)
+                        + ", non-mojang=" + nonMojangSummary(nonMojang));
     }
 
-    private record ResolverResults(PremiumResolution premium, PremiumResolution offline, boolean hasUnknown) {}
+    private void logQuorumFailure(ResolverResults results, String trimmed) {
+        if (!logger.isWarnEnabled()) {
+            return;
+        }
+        PremiumResolution mojang = results.byId(AUTHORITATIVE_RESOLVER_ID);
+        List<PremiumResolution> nonMojang = results.nonAuthoritativeResults();
+        logger.warn(PREMIUM_MARKER,
+                "[PARALLEL] {} UNKNOWN: mojang={} non-mojang={} — login will be denied (fail-closed)",
+                trimmed, statusLabel(mojang), nonMojangSummary(nonMojang));
+    }
+
+    private static String statusLabel(PremiumResolution resolution) {
+        if (resolution == null) {
+            return "absent";
+        }
+        if (resolution.isPremium()) {
+            return "PREMIUM";
+        }
+        if (resolution.isOffline()) {
+            return "OFFLINE";
+        }
+        return "UNKNOWN";
+    }
+
+    private static String nonMojangSummary(List<PremiumResolution> nonMojang) {
+        if (nonMojang.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < nonMojang.size(); i++) {
+            PremiumResolution r = nonMojang.get(i);
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(r.source()).append('=').append(statusLabel(r));
+        }
+        return sb.append(']').toString();
+    }
+
+    /**
+     * Per-resolver result bag returned by {@link #executeResolversInParallel}.
+     * Keyed by {@link PremiumResolver#id()} so {@link #selectBestResult} can apply
+     * resolver-specific trust (e.g. Mojang is authoritative for OFFLINE).
+     */
+    private record ResolverResults(Map<String, PremiumResolution> byResolver) {
+
+        PremiumResolution firstPremium() {
+            for (PremiumResolution r : byResolver.values()) {
+                if (r != null && r.isPremium()) {
+                    return r;
+                }
+            }
+            return null;
+        }
+
+        PremiumResolution byId(String id) {
+            return byResolver.get(id);
+        }
+
+        List<PremiumResolution> nonAuthoritativeResults() {
+            List<PremiumResolution> out = new ArrayList<>(byResolver.size());
+            for (Map.Entry<String, PremiumResolution> entry : byResolver.entrySet()) {
+                if (!AUTHORITATIVE_RESOLVER_ID.equals(entry.getKey()) && entry.getValue() != null) {
+                    out.add(entry.getValue());
+                }
+            }
+            return out;
+        }
+    }
 
     /**
      * Saves premium resolution to database cache.

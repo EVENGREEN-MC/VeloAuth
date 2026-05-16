@@ -242,33 +242,39 @@ public class PreLoginHandler {
      * @param username Username for logging
      */
     private void markAsConflicted(RegisteredPlayer existingPlayer, String username) {
-        if (!existingPlayer.getConflictMode()) {
-            existingPlayer.setConflictMode(true);
-            existingPlayer.setConflictTimestamp(System.currentTimeMillis());
-            existingPlayer.setOriginalNickname(existingPlayer.getNickname());
-            // Fire-and-forget: don't block Netty IO thread with .join()
-            databaseManager.savePlayer(existingPlayer)
-                    .exceptionally(throwable -> {
-                        logger.error(SECURITY_MARKER, "[NICKNAME CONFLICT] Failed to save conflict state for {}: {}",
-                                username, throwable.getMessage());
-                        return null;
-                    })
-                    .thenAccept(result -> {
-                        if (result != null && result.isDatabaseError()) {
-                            logger.error(SECURITY_MARKER,
-                                    "[NICKNAME CONFLICT] Failed to save conflict state for {} — retrying once",
-                                    username);
-                            databaseManager.savePlayer(existingPlayer)
-                                    .thenAccept(retryResult -> {
-                                        if (retryResult != null && retryResult.isDatabaseError()) {
-                                            logger.error(SECURITY_MARKER,
-                                                    "[NICKNAME CONFLICT] Retry also failed for {}", username);
-                                        }
-                                    });
-                        }
-                    });
-            logger.info("[NICKNAME CONFLICT] Premium player {} detected conflict with offline account", username);
+        if (existingPlayer.getConflictMode()) {
+            return;
         }
+        existingPlayer.setConflictMode(true);
+        existingPlayer.setConflictTimestamp(System.currentTimeMillis());
+        existingPlayer.setOriginalNickname(existingPlayer.getNickname());
+        // Fire-and-forget: don't block Netty IO thread with .join()
+        databaseManager.savePlayer(existingPlayer)
+                .exceptionally(throwable -> {
+                    logger.error(SECURITY_MARKER, "[NICKNAME CONFLICT] Failed to save conflict state for {}: {}",
+                            username, throwable.getMessage());
+                    return null;
+                })
+                .thenAccept(result -> retryConflictSaveIfNeeded(result, existingPlayer, username));
+        logger.info("[NICKNAME CONFLICT] Premium player {} detected conflict with offline account", username);
+    }
+
+    /** Second attempt to persist conflict state if the first one returned a DB error. Two retries
+     *  is the cap — name-conflict marking is best-effort; the listener proceeds without it. */
+    private void retryConflictSaveIfNeeded(net.rafalohaki.veloauth.database.DatabaseManager.DbResult<Boolean> result,
+                                            RegisteredPlayer existingPlayer, String username) {
+        if (result == null || !result.isDatabaseError()) {
+            return;
+        }
+        logger.error(SECURITY_MARKER,
+                "[NICKNAME CONFLICT] Failed to save conflict state for {} — retrying once", username);
+        databaseManager.savePlayer(existingPlayer)
+                .thenAccept(retryResult -> {
+                    if (retryResult != null && retryResult.isDatabaseError()) {
+                        logger.error(SECURITY_MARKER,
+                                "[NICKNAME CONFLICT] Retry also failed for {}", username);
+                    }
+                });
     }
 
     /**

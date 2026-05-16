@@ -24,6 +24,7 @@ import net.rafalohaki.veloauth.listener.ListenerFactory;
 import net.rafalohaki.veloauth.alert.PremiumResolverAlertService;
 import net.rafalohaki.veloauth.audit.AuditLogService;
 import net.rafalohaki.veloauth.auth.totp.PendingTotpStore;
+import net.rafalohaki.veloauth.auth.totp.TotpReplayGuard;
 import net.rafalohaki.veloauth.auth.totp.TotpService;
 import net.rafalohaki.veloauth.premium.PremiumResolverService;
 import net.rafalohaki.veloauth.util.VirtualThreadExecutorProvider;
@@ -76,6 +77,7 @@ public class VeloAuth {
     private AuditLogService auditLogService;
     private TotpService totpService;
     private PendingTotpStore pendingTotpStore;
+    private TotpReplayGuard totpReplayGuard;
     private ScheduledExecutorService premiumCacheCleanupScheduler;
     private ScheduledExecutorService premiumDbCleanupScheduler;
     private ScheduledExecutorService auditLogCleanupScheduler;
@@ -397,6 +399,7 @@ public class VeloAuth {
     private void initializeTwoFactor() {
         Settings.TwoFactorSettings twoFactorSettings = settings.getTwoFactorSettings();
         this.totpService = new TotpService();
+        this.totpReplayGuard = new TotpReplayGuard();
         java.time.Duration pendingTtl = java.time.Duration.ofSeconds(twoFactorSettings.getPendingTimeoutSeconds());
         this.pendingTotpStore = new PendingTotpStore(pendingTtl, auditLogService);
 
@@ -862,6 +865,11 @@ public class VeloAuth {
     /** @return store of in-flight 2FA verification states (post-BCrypt and pending /2fa setup). */
     public PendingTotpStore getPendingTotpStore() {
         return pendingTotpStore;
+    }
+
+    /** @return per-player TOTP replay guard (RFC 6238 §5.2 — one-time-only enforcement). */
+    public TotpReplayGuard getTotpReplayGuard() {
+        return totpReplayGuard;
     }
 
     /**

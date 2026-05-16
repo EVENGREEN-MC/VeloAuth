@@ -80,6 +80,11 @@
         <exclude name="UseObjectForClearerAPI"/>
         <!-- Driver loading pattern uses exception for flow -->
         <exclude name="ExceptionAsFlowControl"/>
+        <!-- Project convention (see CLAUDE.md): one public gateway per package, helpers are
+             package-private. Inner data classes (DAOs, services) legitimately expose public
+             methods so the outer public API can call them across packages without making the
+             helper itself public. -->
+        <exclude name="PublicMemberInNonPublicType"/>
     </rule>
 
     <!-- Error Prone -->
@@ -104,6 +109,11 @@
         <exclude name="CloseResource"/>
         <!-- Minecraft usernames are ASCII-only -->
         <exclude name="UseLocaleWithCaseConversions"/>
+        <!-- Plugin error handling requires catching broad exceptions at fail-safe boundaries
+             (Velocity event handlers, scheduler ticks, async whenComplete tails, audit writes).
+             Re-listed here because PMD 7 moved the rule from design.xml to errorprone.xml; the
+             original exclude under category/java/design.xml is now a deprecated alias. -->
+        <exclude name="AvoidCatchingGenericException"/>
     </rule>
 
     <!-- Multithreading -->
@@ -146,7 +156,9 @@
     <rule ref="category/java/errorprone.xml/AvoidDuplicateLiterals">
         <properties>
             <property name="skipAnnotations" value="true"/>
-            <property name="maxDuplicateLiterals" value="6"/> <!-- Allow up to 6 duplicates -->
+            <!-- SQL DAOs legitimately repeat short fragments like " = ?" 6-8× per file
+                 (UPSERT bodies); refactoring to constants reduces readability. -->
+            <property name="maxDuplicateLiterals" value="8"/>
         </properties>
     </rule>
 

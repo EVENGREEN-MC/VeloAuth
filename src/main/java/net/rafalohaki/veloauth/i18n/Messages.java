@@ -244,7 +244,10 @@ public class Messages {
                             resolvedKey, currentLanguage);
                     return formatMessageSafely(message, resolvedKey, args);
                 } catch (MissingResourceException ignoredEn) {
-                    // fall through to the absolute fallback below
+                    // Both the active language and the English fallback are missing the key;
+                    // fall through to the "Missing: <key>" placeholder below. Debug log so
+                    // translators have a hint when adding new strings.
+                    logger.debug("English fallback also missing key '{}'", resolvedKey);
                 }
             }
             logger.warn("Missing translation key '{}' in all available languages", resolvedKey);
@@ -300,20 +303,25 @@ public class Messages {
         }
 
         StringBuilder sb = new StringBuilder(message.length() + 8);
-        for (int index = 0; index < message.length(); index++) {
+        // While loop instead of for: doubled apostrophes ("''") consume two chars in one step,
+        // which the for-loop variable would otherwise have to be reassigned to track.
+        int index = 0;
+        while (index < message.length()) {
             char character = message.charAt(index);
             if (character != '\'') {
                 sb.append(character);
+                index++;
                 continue;
             }
 
             if (index + 1 < message.length() && message.charAt(index + 1) == '\'') {
                 sb.append("''");
-                index++;
+                index += 2;
                 continue;
             }
 
             sb.append("''");
+            index++;
         }
         return sb.toString();
     }

@@ -642,55 +642,76 @@ public class ConnectionManager {
 
     /**
      * Znajduje dostępny serwer backend używając Velocity try servers configuration.
-     * Iteruje przez listę serwerów z velocity.toml [servers.try] w kolejności.
-     *
-     * @return Optional z dostępny serwer backend
+     * Sync wrapper used by callers that already run on a virtual thread; prefer
+     * {@link #findAvailableBackendServerAsync()} when composing async chains.
      */
     private Optional<RegisteredServer> findAvailableBackendServer() {
+        return findAvailableBackendServerAsync().join();
+    }
+
+    /**
+     * Fully-async variant: pings every candidate (try list, then full fallback) in parallel.
+     * <p>
+     * Previous behavior: the try-list phase pinged in parallel but the fallback (line 690 in
+     * the old code) used a sequential stream of {@code isServerAvailable(...).join()} — worst
+     * case <em>N × 2 s</em> blocked on the calling thread. The new fallback fans out pings
+     * in parallel just like the try-list, so worst-case wall time stays at one 2 s ping
+     * timeout regardless of how many servers are registered.
+     */
+    private CompletableFuture<Optional<RegisteredServer>> findAvailableBackendServerAsync() {
         String authServerName = settings.getAuthServerName();
-        
-        // Użyj Velocity try servers configuration
         var tryServers = plugin.getServer().getConfiguration().getAttemptConnectionOrder();
-        
         if (logger.isDebugEnabled()) {
             logger.debug("Velocity try servers: {}", tryServers);
         }
-        
-        // Collect candidate servers (excluding auth server)
-        java.util.List<RegisteredServer> candidates = tryServers.stream()
+
+        java.util.List<RegisteredServer> tryCandidates = tryServers.stream()
                 .filter(name -> !name.equals(authServerName))
                 .flatMap(name -> plugin.getServer().getServer(name).stream())
                 .toList();
 
+        return pickFirstAvailable(tryCandidates).thenCompose(found -> {
+            if (found.isPresent()) {
+                return CompletableFuture.completedFuture(found);
+            }
+            if (tryCandidates.isEmpty()) {
+                logger.warn("No backend candidates found in try list");
+            }
+            // Fallback: parallel ping of every registered server (minus auth).
+            logger.warn("No server from try list is available, attempting fallback...");
+            java.util.List<RegisteredServer> fallbackCandidates = plugin.getServer().getAllServers().stream()
+                    .filter(server -> !server.getServerInfo().getName().equals(authServerName))
+                    .toList();
+            return pickFirstAvailable(fallbackCandidates);
+        });
+    }
+
+    /**
+     * Pings all candidates in parallel; returns the first one whose ping completes successfully,
+     * preserving input order. Used by both phases of {@link #findAvailableBackendServerAsync()}.
+     */
+    private CompletableFuture<Optional<RegisteredServer>> pickFirstAvailable(
+            java.util.List<RegisteredServer> candidates) {
         if (candidates.isEmpty()) {
-            logger.warn("No backend candidates found in try list");
-        } else {
-            // Ping all candidates in parallel with 2s timeout
-            @SuppressWarnings("unchecked")
-            CompletableFuture<Boolean>[] pings = candidates.stream()
-                    .map(server -> server.ping()
-                            .orTimeout(2, TimeUnit.SECONDS)
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+        @SuppressWarnings("unchecked")
+        CompletableFuture<Boolean>[] pings = candidates.stream()
+                .map(server -> server.ping()
+                        .orTimeout(2, TimeUnit.SECONDS)
                         .handle((ignored, ex) -> ex == null))
-                    .toArray(CompletableFuture[]::new);
+                .toArray(CompletableFuture[]::new);
 
-            CompletableFuture.allOf(pings).join();
-
-            // Return the first available server (preserving try order)
+        return CompletableFuture.allOf(pings).thenApply(ignored -> {
             for (int i = 0; i < candidates.size(); i++) {
-                if (Boolean.TRUE.equals(pings[i].join())) {
+                if (Boolean.TRUE.equals(pings[i].getNow(false))) {
                     RegisteredServer available = candidates.get(i);
                     logger.debug("Found available server: {}", available.getServerInfo().getName());
                     return Optional.of(available);
                 }
             }
-        }
-        
-        // Fallback: jeśli żaden try server nie jest dostępny, spróbuj dowolny inny
-        logger.warn("No server from try list is available, attempting fallback...");
-        return plugin.getServer().getAllServers().stream()
-                .filter(server -> !server.getServerInfo().getName().equals(authServerName))
-                .filter(server -> isServerAvailable(server, server.getServerInfo().getName()))
-                .findFirst();
+            return Optional.empty();
+        });
     }
 
     /**
@@ -760,9 +781,19 @@ public class ConnectionManager {
         }
     }
 
+    /**
+     * Sync availability check — only used by {@link #resolveForcedHostTarget} which already
+     * runs on a virtual thread (called from transfer paths that are themselves submitted to
+     * the VT executor). For new code prefer pinging in parallel via
+     * {@link #pickFirstAvailable(java.util.List)}.
+     */
     private boolean isServerAvailable(RegisteredServer server, String serverName) {
         try {
-            if (server.ping().orTimeout(2, TimeUnit.SECONDS).join() != null) {
+            Boolean ok = server.ping()
+                    .orTimeout(2, TimeUnit.SECONDS)
+                    .handle((ignored, ex) -> ex == null)
+                    .join();
+            if (Boolean.TRUE.equals(ok)) {
                 logger.debug("Found available server: {}", serverName);
                 return true;
             }

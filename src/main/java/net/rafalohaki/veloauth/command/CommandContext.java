@@ -15,7 +15,11 @@ import org.slf4j.Logger;
 import org.slf4j.Marker;
 import org.slf4j.MarkerFactory;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+
 import java.net.InetAddress;
+import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -38,6 +42,18 @@ class CommandContext {
     private final SimpleMessages sm;
     private final IPRateLimiter ipRateLimiter;
     private final ConcurrentHashMap<UUID, Boolean> activeCommands = new ConcurrentHashMap<>();
+
+    /**
+     * Per-IP mutex for the {@code /register} flow. Closes the TOCTOU window between the
+     * "count registrations by IP" check and the "save player" write: two concurrent /register
+     * commands from the same IP can no longer both pass the {@code ip-limit-registrations}
+     * gate. Caffeine-bounded (≤10k IPs) with a short TTL — far longer than any register call
+     * but bounded enough to recover from leaked locks if a register handler throws past its
+     * release point. */
+    private final Cache<InetAddress, Boolean> registrationLocks = Caffeine.newBuilder()
+            .maximumSize(10_000)
+            .expireAfterWrite(Duration.ofMinutes(1))
+            .build();
 
     CommandContext(VeloAuth plugin, DatabaseManager databaseManager,
                    AuthCache authCache, Settings settings, Messages messages) {
@@ -64,6 +80,7 @@ class CommandContext {
     IPRateLimiter ipRateLimiter() { return ipRateLimiter; }
     net.rafalohaki.veloauth.auth.totp.TotpService totpService() { return plugin.getTotpService(); }
     net.rafalohaki.veloauth.auth.totp.PendingTotpStore pendingTotpStore() { return plugin.getPendingTotpStore(); }
+    net.rafalohaki.veloauth.auth.totp.TotpReplayGuard totpReplayGuard() { return plugin.getTotpReplayGuard(); }
     net.rafalohaki.veloauth.audit.AuditLogService auditLogService() { return plugin.getAuditLogService(); }
 
     /**
@@ -220,5 +237,24 @@ class CommandContext {
      */
     void releaseCommandLock(UUID playerId) {
         activeCommands.remove(playerId);
+    }
+
+    /**
+     * Tries to acquire the per-IP register lock — closes the TOCTOU window on
+     * {@code ip-limit-registrations}. {@code null} address never acquires (treated as
+     * not-allowed; caller surface defends with its own null-checks).
+     */
+    boolean tryAcquireRegistrationLock(InetAddress address) {
+        if (address == null) {
+            return false;
+        }
+        return registrationLocks.asMap().putIfAbsent(address, Boolean.TRUE) == null;
+    }
+
+    /** Releases the per-IP register lock. No-op for {@code null}. */
+    void releaseRegistrationLock(InetAddress address) {
+        if (address != null) {
+            registrationLocks.invalidate(address);
+        }
     }
 }

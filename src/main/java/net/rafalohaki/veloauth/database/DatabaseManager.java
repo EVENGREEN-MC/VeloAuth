@@ -21,8 +21,9 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 /**
  * Manager bazy danych z obsługą ORMLite, connection pooling i thread-safety.
@@ -68,7 +69,14 @@ public class DatabaseManager {
 
 
     private final ConcurrentHashMap<String, RegisteredPlayer> playerCache;
-    private final ReentrantLock databaseLock;
+    /** Idempotency guard for {@link #initialize()} — prevents two concurrent init paths from
+     *  both running {@code performDatabaseInitialization()}. */
+    private final AtomicBoolean initializing = new AtomicBoolean(false);
+    /** Mutual exclusion between {@link #initialize()} and {@link #shutdown()}: without this,
+     *  a shutdown firing while init is still assigning {@code connectionSource} could null the
+     *  field mid-{@code initializeDaos()} and cause an NPE inside ORMLite's {@code DaoManager}.
+     *  Held only for the duration of those two methods — neither is on a hot path. */
+    private final ReentrantLock lifecycleLock = new ReentrantLock();
     private final DatabaseConfig config;
     private final Messages messages;
     private final ExecutorService dbExecutor;
@@ -100,7 +108,6 @@ public class DatabaseManager {
         this.config = config;
         this.messages = messages;
         this.playerCache = new ConcurrentHashMap<>();
-        this.databaseLock = new ReentrantLock();
         this.connected = false;
         this.dbExecutor = VirtualThreadExecutorProvider.getVirtualExecutor();
         this.jdbcAuthDao = new JdbcAuthDao(config);
@@ -139,18 +146,23 @@ public class DatabaseManager {
      */
     public CompletableFuture<Boolean> initialize() {
         return CompletableFuture.supplyAsync(() -> {
-            try {
-                databaseLock.lock();
-                try {
-                    return performDatabaseInitialization();
-                } finally {
-                    databaseLock.unlock();
+            if (!initializing.compareAndSet(false, true)) {
+                if (logger.isWarnEnabled()) {
+                    logger.warn(DB_MARKER, "initialize() called concurrently — refusing duplicate call");
                 }
+                return connected;
+            }
+            lifecycleLock.lock();
+            try {
+                return performDatabaseInitialization();
             } catch (SQLException e) {
                 if (logger.isErrorEnabled()) {
                     logger.error(DB_MARKER, "Error during database initialization", e);
                 }
                 return false;
+            } finally {
+                lifecycleLock.unlock();
+                initializing.set(false);
             }
         }, dbExecutor);
     }
@@ -263,12 +275,14 @@ public class DatabaseManager {
         try {
             healthCheck.stop();
             connected = false;
-
-            databaseLock.lock();
+            // Wait for any in-flight initialize() to finish its connectionSource assignment
+            // before we tear down resources; otherwise we could null connectionSource while
+            // initializeDaos() is mid-call.
+            lifecycleLock.lock();
             try {
                 closeConnectionResources();
             } finally {
-                databaseLock.unlock();
+                lifecycleLock.unlock();
             }
         } catch (RuntimeException e) {
             if (logger.isErrorEnabled()) {
@@ -455,24 +469,31 @@ public class DatabaseManager {
     private DbResult<RegisteredPlayer> queryAndCachePlayer(String normalizedNickname, String originalNickname, boolean runtimeDetection) {
         try {
             RegisteredPlayer player = jdbcAuthDao.findPlayerByLowercaseNickname(normalizedNickname);
-            if (player != null) {
-                if (player.getLowercaseNickname().equals(normalizedNickname)) {
-                    playerCache.put(normalizedNickname, player);
-                    if (runtimeDetection) {
-                        logRuntimeDetection(originalNickname, isPlayerPremiumRuntime(player), player.getHash());
-                    } else if (logger.isDebugEnabled()) {
-                        logger.debug(CACHE_MARKER, "Cache MISS -> DB HIT dla gracza: {}", normalizedNickname);
-                    }
-                } else if (logger.isWarnEnabled()) {
-                    logger.warn(CACHE_MARKER, "Database inconsistency for {} - expected {}, found {}",
-                            normalizedNickname, normalizedNickname, player.getLowercaseNickname());
-                }
-            } else {
+            if (player == null) {
                 logPlayerNotFound(normalizedNickname);
+                return DbResult.success(null);
             }
+            cacheAndLogLookup(normalizedNickname, originalNickname, runtimeDetection, player);
             return DbResult.success(player);
         } catch (SQLException e) {
             return handleDatabaseError(normalizedNickname, e);
+        }
+    }
+
+    private void cacheAndLogLookup(String normalizedNickname, String originalNickname,
+                                    boolean runtimeDetection, RegisteredPlayer player) {
+        if (!player.getLowercaseNickname().equals(normalizedNickname)) {
+            if (logger.isWarnEnabled()) {
+                logger.warn(CACHE_MARKER, "Database inconsistency for {} - expected {}, found {}",
+                        normalizedNickname, normalizedNickname, player.getLowercaseNickname());
+            }
+            return;
+        }
+        playerCache.put(normalizedNickname, player);
+        if (runtimeDetection) {
+            logRuntimeDetection(originalNickname, isPlayerPremiumRuntime(player), player.getHash());
+        } else if (logger.isDebugEnabled()) {
+            logger.debug(CACHE_MARKER, "Cache MISS -> DB HIT dla gracza: {}", normalizedNickname);
         }
     }
 
@@ -692,10 +713,7 @@ public class DatabaseManager {
                     logger.debug(DB_MARKER, "Premium status from PREMIUM_UUIDS for {}: {}", username, premium);
                 }
                 return DbResult.success(premium);
-            } catch (SQLException e) {
-                logDatabaseOperationFailure("premium status check", username, e);
-                return genericDatabaseErrorResult();
-            } catch (RuntimeException e) {
+            } catch (SQLException | RuntimeException e) {
                 logDatabaseOperationFailure("premium status check", username, e);
                 return genericDatabaseErrorResult();
             }
@@ -820,10 +838,7 @@ public class DatabaseManager {
                             username, premiumUuid, success);
                 }
                 return DbResult.success(success);
-            } catch (SQLException e) {
-                logDatabaseOperationFailure("premium UUID sync", username, e);
-                return genericDatabaseErrorResult();
-            } catch (RuntimeException e) {
+            } catch (SQLException | RuntimeException e) {
                 logDatabaseOperationFailure("premium UUID sync", username, e);
                 return genericDatabaseErrorResult();
             }

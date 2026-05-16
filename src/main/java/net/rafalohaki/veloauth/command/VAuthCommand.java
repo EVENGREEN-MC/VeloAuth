@@ -220,7 +220,8 @@ class VAuthCommand implements SimpleCommand {
 
         for (int i = 0; i < conflicts.size(); i++) {
             RegisteredPlayer conflict = conflicts.get(i);
-            StringBuilder conflictInfo = new StringBuilder();
+            // Initial capacity sized for a typical conflict block: ~5 fields × ~40 chars + headers.
+            StringBuilder conflictInfo = new StringBuilder(256);
             conflictInfo.append("§e").append(i + 1).append(". §f").append(conflict.getNickname()).append("\n");
             conflictInfo.append(CONFLICT_PREFIX).append(ctx.messages().get("admin.conflicts.uuid", conflict.getUuid())).append("\n");
             conflictInfo.append(CONFLICT_PREFIX).append(ctx.messages().get("admin.conflicts.ip", conflict.getIp())).append("\n");

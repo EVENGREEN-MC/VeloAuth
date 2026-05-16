@@ -229,7 +229,14 @@ class TwoFactorCommand implements SimpleCommand {
         if (dbPlayer == null) {
             return;
         }
-        if (!ctx.totpService().verify(pending.newSecret(), code)) {
+        long matchedWindow = ctx.totpService().matchedWindow(pending.newSecret(), code);
+        if (matchedWindow == net.rafalohaki.veloauth.auth.totp.TotpService.NO_WINDOW_MATCH) {
+            player.sendMessage(ctx.sm().twoFactorVerifyWrongCode());
+            return;
+        }
+        // RFC 6238 §5.2 — claim the window so the same code can't be re-used (covers concurrent
+        // /2fa verify from a parallel session in the tolerance band).
+        if (!ctx.totpReplayGuard().consume(player.getUniqueId(), matchedWindow)) {
             player.sendMessage(ctx.sm().twoFactorVerifyWrongCode());
             return;
         }
@@ -257,11 +264,22 @@ class TwoFactorCommand implements SimpleCommand {
     private void completeLogin(Player player, PendingTotpState pending, String code) {
         RegisteredPlayer dbPlayer = pending.dbPlayer();
         String storedSecret = dbPlayer.getTotpToken();
-        if (!ctx.totpService().verify(storedSecret, code)) {
+        long matchedWindow = ctx.totpService().matchedWindow(storedSecret, code);
+        if (matchedWindow == net.rafalohaki.veloauth.auth.totp.TotpService.NO_WINDOW_MATCH) {
             ctx.authCache().registerFailedLogin(
                     PlayerAddressUtils.getPlayerAddress(player), dbPlayer.getNickname());
             emit(AuditEventType.TWO_FACTOR_VERIFY_FAIL, dbPlayer.getNickname(),
                     PlayerAddressUtils.getPlayerIp(player), "wrong-code");
+            player.sendMessage(ctx.sm().twoFactorVerifyWrongCode());
+            return;
+        }
+        // RFC 6238 §5.2 — bail out if this window was already consumed by an earlier verify
+        // (race with another session / leaked code being replayed).
+        if (!ctx.totpReplayGuard().consume(player.getUniqueId(), matchedWindow)) {
+            ctx.authCache().registerFailedLogin(
+                    PlayerAddressUtils.getPlayerAddress(player), dbPlayer.getNickname());
+            emit(AuditEventType.TWO_FACTOR_VERIFY_FAIL, dbPlayer.getNickname(),
+                    PlayerAddressUtils.getPlayerIp(player), "replay");
             player.sendMessage(ctx.sm().twoFactorVerifyWrongCode());
             return;
         }
@@ -301,7 +319,12 @@ class TwoFactorCommand implements SimpleCommand {
             player.sendMessage(ctx.sm().twoFactorDisableNotEnabled());
             return;
         }
-        if (!ctx.totpService().verify(dbPlayer.getTotpToken(), code)) {
+        long matchedWindow = ctx.totpService().matchedWindow(dbPlayer.getTotpToken(), code);
+        if (matchedWindow == net.rafalohaki.veloauth.auth.totp.TotpService.NO_WINDOW_MATCH) {
+            player.sendMessage(ctx.sm().twoFactorDisableWrongCode());
+            return;
+        }
+        if (!ctx.totpReplayGuard().consume(player.getUniqueId(), matchedWindow)) {
             player.sendMessage(ctx.sm().twoFactorDisableWrongCode());
             return;
         }

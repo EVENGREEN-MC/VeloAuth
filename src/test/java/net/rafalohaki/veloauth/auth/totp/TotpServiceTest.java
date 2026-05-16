@@ -133,4 +133,49 @@ class TotpServiceTest {
         assertThrows(IllegalArgumentException.class, () -> new TotpService(-1));
         assertThrows(IllegalArgumentException.class, () -> new TotpService(6));
     }
+
+    @Test
+    void matchedWindow_returnsAbsoluteWindowForValidCode() {
+        // The replay-protection caller needs the *absolute* window counter, not a relative
+        // offset, so it can persist it and reject re-use across the tolerance band.
+        TotpService svc = new TotpService(1);
+        String secret = svc.generateSecret();
+        byte[] key = Base32.decode(secret);
+        long window = svc.currentWindow();
+
+        int code = TotpService.generateCode(key, window);
+        long matched = svc.matchedWindow(secret, String.format("%06d", code));
+        assertEquals(window, matched,
+                "matchedWindow must report the current window for a current-window code");
+
+        int previous = TotpService.generateCode(key, window - 1);
+        assertEquals(window - 1, svc.matchedWindow(secret, String.format("%06d", previous)),
+                "matchedWindow must report the previous window for a tolerance-band code");
+    }
+
+    @Test
+    void matchedWindow_returnsSentinelForCodeOutsideToleranceBand() {
+        // Build a code from a window well outside the ±1 default tolerance — guaranteed not
+        // to match any window in the band, regardless of which random secret we got.
+        TotpService svc = new TotpService(1);
+        String secret = svc.generateSecret();
+        byte[] key = Base32.decode(secret);
+        int outOfBandCode = TotpService.generateCode(key, svc.currentWindow() + 100);
+
+        assertEquals(TotpService.NO_WINDOW_MATCH,
+                svc.matchedWindow(secret, String.format("%06d", outOfBandCode)),
+                "Code from a window outside the tolerance band must not match");
+    }
+
+    @Test
+    void matchedWindow_returnsSentinelForMalformedInput() {
+        TotpService svc = new TotpService();
+        String secret = svc.generateSecret();
+        assertEquals(TotpService.NO_WINDOW_MATCH, svc.matchedWindow(secret, null));
+        assertEquals(TotpService.NO_WINDOW_MATCH, svc.matchedWindow(secret, "12345"));   // 5 digits
+        assertEquals(TotpService.NO_WINDOW_MATCH, svc.matchedWindow(secret, "1234567")); // 7 digits
+        assertEquals(TotpService.NO_WINDOW_MATCH, svc.matchedWindow(secret, "abcdef"));
+        assertEquals(TotpService.NO_WINDOW_MATCH, svc.matchedWindow(null, "123456"));
+        assertEquals(TotpService.NO_WINDOW_MATCH, svc.matchedWindow("", "123456"));
+    }
 }

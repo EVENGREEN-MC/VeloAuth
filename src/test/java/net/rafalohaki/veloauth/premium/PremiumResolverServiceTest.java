@@ -362,4 +362,136 @@ class PremiumResolverServiceTest {
         // Verify was called multiple times (once per thread)
         verify(dao, times(10)).findByNickname(username);
     }
+
+    // ===== Mojang-authoritative + non-Mojang quorum policy (selectBestResult) =====
+
+    private PremiumResolver mockResolver(String id, PremiumResolution result) {
+        PremiumResolver r = mock(PremiumResolver.class);
+        when(r.enabled()).thenReturn(true);
+        when(r.id()).thenReturn(id);
+        when(r.resolve(anyString())).thenReturn(result);
+        return r;
+    }
+
+    private PremiumResolverService serviceWith(List<PremiumResolver> resolvers) {
+        when(dao.findByNickname(anyString())).thenReturn(Optional.empty());
+        return new PremiumResolverService(logger, dao, resolvers, 10 * 60_000L, 3 * 60_000L);
+    }
+
+    @Test
+    void selectBestResult_mojangOffline_isAuthoritative() {
+        // Mojang says OFFLINE — that alone is enough regardless of mirrors.
+        String username = "AuthOfflineNick";
+        PremiumResolver mojang = mockResolver("mojang",
+                PremiumResolution.offline(username, "mojang", "not-found"));
+        PremiumResolver ashcon = mockResolver("ashcon",
+                PremiumResolution.unknown("ashcon", "timeout"));
+
+        PremiumResolution result = serviceWith(List.of(mojang, ashcon)).resolve(username);
+
+        assertTrue(result.isOffline(),
+                "Mojang's authoritative OFFLINE must win over Ashcon UNKNOWN");
+        assertEquals("mojang", result.source(),
+                "Returned resolution should be Mojang's");
+    }
+
+    @Test
+    void selectBestResult_mojangUnknownAndMirrorOffline_returnsOfflineByQuorum() {
+        // Mojang silent, single mirror says OFFLINE → quorum-of-1 is enough (unanimous among
+        // enabled non-Mojang resolvers).
+        String username = "QuorumOfOneNick";
+        PremiumResolver mojang = mockResolver("mojang",
+                PremiumResolution.unknown("mojang", "timeout"));
+        PremiumResolver ashcon = mockResolver("ashcon",
+                PremiumResolution.offline(username, "ashcon", "not-found"));
+
+        PremiumResolution result = serviceWith(List.of(mojang, ashcon)).resolve(username);
+
+        assertTrue(result.isOffline(),
+                "Mojang UNKNOWN + Ashcon OFFLINE (unanimous non-Mojang) → OFFLINE");
+        assertEquals("ashcon", result.source());
+    }
+
+    @Test
+    void selectBestResult_mojangUnknownAndMirrorsAllOffline_returnsOfflineByQuorum() {
+        // Mojang silent, BOTH mirrors say OFFLINE → unanimous quorum.
+        String username = "QuorumOfTwoNick";
+        PremiumResolver mojang = mockResolver("mojang",
+                PremiumResolution.unknown("mojang", "rate-limit"));
+        PremiumResolver ashcon = mockResolver("ashcon",
+                PremiumResolution.offline(username, "ashcon", "not-found"));
+        PremiumResolver wpme = mockResolver("wpme",
+                PremiumResolution.offline(username, "wpme", "not-found"));
+
+        PremiumResolution result = serviceWith(List.of(mojang, ashcon, wpme)).resolve(username);
+
+        assertTrue(result.isOffline(),
+                "Mojang UNKNOWN + all mirrors OFFLINE → OFFLINE");
+    }
+
+    @Test
+    void selectBestResult_mojangUnknownAndOneMirrorUnknown_returnsUnknownToDenyLogin() {
+        // THE KEY SECURITY TEST: Mojang silent, one mirror OFFLINE, another mirror UNKNOWN.
+        // Previous policy: OFFLINE (the silent mirror could be a stale cache covering a real
+        // premium account → name-sniping window).
+        // New policy: UNKNOWN (insufficient evidence; listener will deny login fail-closed).
+        String username = "NoQuorumNick";
+        PremiumResolver mojang = mockResolver("mojang",
+                PremiumResolution.unknown("mojang", "timeout"));
+        PremiumResolver ashcon = mockResolver("ashcon",
+                PremiumResolution.offline(username, "ashcon", "not-found"));
+        PremiumResolver wpme = mockResolver("wpme",
+                PremiumResolution.unknown("wpme", "timeout"));
+
+        PremiumResolution result = serviceWith(List.of(mojang, ashcon, wpme)).resolve(username);
+
+        assertTrue(result.isUnknown(),
+                "Mojang UNKNOWN + Ashcon OFFLINE + wpme UNKNOWN → UNKNOWN (no quorum). "
+                        + "Listener will deny login fail-closed to prevent name-sniping.");
+    }
+
+    @Test
+    void selectBestResult_premiumFromAnyResolver_winsImmediately() {
+        // PREMIUM is a positive assertion; one confirmation is enough — even from a mirror.
+        String username = "PremiumWinsNick";
+        UUID uuid = UUID.randomUUID();
+        PremiumResolver mojang = mockResolver("mojang",
+                PremiumResolution.unknown("mojang", "timeout"));
+        PremiumResolver ashcon = mockResolver("ashcon",
+                PremiumResolution.premium(uuid, username, "ashcon"));
+
+        when(dao.saveOrUpdate(any(UUID.class), anyString())).thenReturn(true);
+        PremiumResolution result = serviceWith(List.of(mojang, ashcon)).resolve(username);
+
+        assertTrue(result.isPremium(),
+                "PREMIUM from a single (mirror) resolver wins even when Mojang is UNKNOWN");
+        assertEquals(uuid, result.uuid());
+    }
+
+    @Test
+    void selectBestResult_mojangDisabledAndMirrorOffline_returnsOfflineByQuorum() {
+        // Mojang resolver not enabled at all. Policy: trust unanimous non-Mojang OFFLINE.
+        String username = "MojangDisabledNick";
+        PremiumResolver ashcon = mockResolver("ashcon",
+                PremiumResolution.offline(username, "ashcon", "not-found"));
+
+        PremiumResolution result = serviceWith(List.of(ashcon)).resolve(username);
+
+        assertTrue(result.isOffline(),
+                "With Mojang disabled, unanimous non-Mojang OFFLINE must still resolve to OFFLINE");
+    }
+
+    @Test
+    void selectBestResult_allResolversUnknown_returnsUnknown() {
+        String username = "AllUnknownNick";
+        PremiumResolver mojang = mockResolver("mojang",
+                PremiumResolution.unknown("mojang", "timeout"));
+        PremiumResolver ashcon = mockResolver("ashcon",
+                PremiumResolution.unknown("ashcon", "timeout"));
+
+        PremiumResolution result = serviceWith(List.of(mojang, ashcon)).resolve(username);
+
+        assertTrue(result.isUnknown(),
+                "All resolvers UNKNOWN → UNKNOWN (login denied)");
+    }
 }

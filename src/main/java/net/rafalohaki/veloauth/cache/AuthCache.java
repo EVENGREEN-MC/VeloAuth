@@ -78,7 +78,6 @@ public class AuthCache {
 
     private final int ttlMinutes;
     private final int maxSize;
-    private final int maxPremiumCache;
     private final int premiumTtlHours;
     private final double premiumRefreshThreshold;
 
@@ -115,7 +114,6 @@ public class AuthCache {
 
         this.ttlMinutes = config.ttlMinutes();
         this.maxSize = config.maxSize();
-        this.maxPremiumCache = config.maxPremiumCache();
         this.premiumTtlHours = settings.getPremiumTtlHours();
         this.premiumRefreshThreshold = settings.getPremiumRefreshThreshold();
         this.settings = settings;

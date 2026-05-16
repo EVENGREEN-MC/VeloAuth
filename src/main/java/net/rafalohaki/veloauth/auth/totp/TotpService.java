@@ -92,13 +92,59 @@ public final class TotpService {
         if (key.length == 0) {
             return false;
         }
+        // Constant-time loop: compare against every window in the tolerance range without an
+        // early return. This collapses the timing oracle that would otherwise reveal *which*
+        // window matched. The brute-force tracker handles rate limiting independently.
+        long window = currentWindow();
+        boolean matched = false;
+        for (int offset = -windowTolerance; offset <= windowTolerance; offset++) {
+            // |= prevents the optimizer from short-circuiting once we've matched.
+            matched |= (input == generateCode(key, window + offset));
+        }
+        return matched;
+    }
+
+    /** Sentinel returned by {@link #matchedWindow} when no window in the tolerance band matched. */
+    public static final long NO_WINDOW_MATCH = Long.MIN_VALUE;
+
+    /**
+     * Internal lookup used by replay protection: returns the absolute window counter
+     * ({@code epochSeconds / 30}) of the window whose code matched, or {@link #NO_WINDOW_MATCH}.
+     * <p>
+     * Not constant-time on purpose — only callable by code that has already established (via
+     * {@link #verify}) that <em>some</em> match exists, so the timing signal here only reveals
+     * which window inside the tolerance band matched (≤ log₂(2·tolerance+1) bits — for default
+     * tolerance=1 that's log₂(3) ≈ 1.58 bits). The replay-protection caller persists the
+     * returned window so the same code can't be re-used inside the tolerance band.
+     */
+    public long matchedWindow(String secretBase32, String code) {
+        if (secretBase32 == null || secretBase32.isBlank() || code == null
+                || code.length() != CODE_DIGITS) {
+            return NO_WINDOW_MATCH;
+        }
+        int input;
+        try {
+            input = Integer.parseInt(code);
+        } catch (NumberFormatException e) {
+            return NO_WINDOW_MATCH;
+        }
+        byte[] key;
+        try {
+            key = Base32.decode(secretBase32);
+        } catch (IllegalArgumentException e) {
+            return NO_WINDOW_MATCH;
+        }
+        if (key.length == 0) {
+            return NO_WINDOW_MATCH;
+        }
         long window = currentWindow();
         for (int offset = -windowTolerance; offset <= windowTolerance; offset++) {
-            if (input == generateCode(key, window + offset)) {
-                return true;
+            long candidate = window + offset;
+            if (input == generateCode(key, candidate)) {
+                return candidate;
             }
         }
-        return false;
+        return NO_WINDOW_MATCH;
     }
 
     /**

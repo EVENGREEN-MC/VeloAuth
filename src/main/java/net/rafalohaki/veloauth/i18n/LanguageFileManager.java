@@ -180,15 +180,6 @@ public final class LanguageFileManager {
     }
     
     /**
-     * Loads a language bundle from the external lang directory.
-     * Falls back to English if the requested language is not found.
-     * Also fills in missing keys from English template for custom language files.
-     *
-     * @param language The language code (e.g., "en", "pl")
-     * @return ResourceBundle containing the language strings
-     * @throws IOException if the language file cannot be loaded
-     */
-    /**
      * Pure existence check: does {@code messages_<language>.properties} already live on disk?
      * <p>
      * Unlike {@link #loadLanguageBundle(String)}, this method never creates or copies files.
@@ -212,6 +203,15 @@ public final class LanguageFileManager {
         return Files.exists(candidate);
     }
 
+    /**
+     * Loads a language bundle from the external lang directory.
+     * Falls back to English if the requested language is not found.
+     * Also fills in missing keys from English template for custom language files.
+     *
+     * @param language The language code (e.g., "en", "pl")
+     * @return ResourceBundle containing the language strings
+     * @throws IOException if the language file cannot be loaded
+     */
     public ResourceBundle loadLanguageBundle(String language) throws IOException {
         validateLanguageCode(language);
         String filename = MESSAGES_PREFIX + language + PROPERTIES_SUFFIX;

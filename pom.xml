@@ -261,6 +261,33 @@
                             <goal>report</goal>
                         </goals>
                     </execution>
+                    <!--
+                      Bundle-level line-coverage floor. Set to 50% to lock in the current
+                      state (≈54% as of 2026-05-16) and prevent regression. Bump in steps
+                      as new tests land — don't try to enforce a higher target retroactively.
+                      Tied to `verify` so `mvnd clean verify` fails on regression.
+                    -->
+                    <execution>
+                        <id>coverage-floor</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.50</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
+                    </execution>
                 </executions>
             </plugin>
 
@@ -370,7 +397,7 @@
                     <printFailingErrors>true</printFailingErrors>
                     <linkXRef>false</linkXRef>
                     <includeTests>true</includeTests>
-                    <failOnViolation>false</failOnViolation>
+                    <failOnViolation>true</failOnViolation>
                     
                     <!-- CPD (Copy-Paste Detector) configuration -->
                     <minimumTokens>50</minimumTokens> <!-- Minimum size for duplicate detection (50 tokens = ~5-10 lines) -->
@@ -387,8 +414,12 @@
                         <id>pmd-check</id>
                         <phase>verify</phase>
                         <goals>
+                            <!-- PMD `check` is a hard gate (failOnViolation=true above). CPD's
+                                 `cpd-check` is intentionally NOT in verify — it would fail the
+                                 build on ~10 known production-code duplications that need
+                                 dedicated extraction PRs. Run `mvnd pmd:cpd-check` manually to
+                                 see the current backlog. -->
                             <goal>check</goal>
-                            <goal>cpd-check</goal>
                         </goals>
                     </execution>
                 </executions>
