@@ -187,11 +187,18 @@ final class DefaultConfigGenerator {
 
                 # Premium account detection configuration
                 premium:
-                  # Enable premium account verification
+                  # Master switch for Mojang/Ashcon premium detection.
+                  #
+                  # true (default): VeloAuth queries Mojang / Ashcon for every new nickname and
+                  # forces online mode (Mojang session-server auth) for premium nicks. Premium
+                  # owners get their real premium UUID; cracked clients on premium nicks are
+                  # rejected with "You are not logged into your Minecraft account.".
+                  #
+                  # false: zero HTTP traffic to Mojang/Ashcon, zero writes to PREMIUM_UUIDS,
+                  # every connection is forced offline mode. All players — including existing
+                  # premium owners with PREMIUMUUID already in AUTH — get offline UUIDs.
+                  # Intended for cracked-only servers and dev/test environments.
                   check-enabled: true
-                  # NOTE: This option is not yet implemented and has no effect
-                  # Force auth for premium players on online-mode proxies
-                  online-mode-need-auth: false
                   # Allow cracked players to register / log in on premium nicknames.
                   #
                   # Default (false): when somebody connects with a nickname that Mojang knows
@@ -205,8 +212,17 @@ final class DefaultConfigGenerator {
                   # forceOfflineMode() is used instead, so a cracked client can register the
                   # nickname first. Once registered as offline, the real premium owner can no
                   # longer take over that nickname automatically — they will hit the nickname
-                  # conflict path. Enable only if your server explicitly accepts cracked
-                  # players on premium nicks and you accept that trade-off.
+                  # conflict path and an admin must resolve it via /vauth conflicts.
+                  #
+                  # IMPORTANT TRADE-OFF: New premium players connecting for the first time will
+                  # get OFFLINE UUIDs permanently. Velocity's PreLoginEvent has no "try online,
+                  # fallback offline" mode (see PaperMC/Velocity#1590, closed), so VeloAuth
+                  # cannot give different UUIDs to a premium owner vs. a cracked imposter on
+                  # the same nickname — it must pick one mode for the whole connection. Existing
+                  # premium owners with PREMIUMUUID already in AUTH keep their premium UUID.
+                  #
+                  # Enable only if your server explicitly accepts cracked players on premium
+                  # nicks and you accept that trade-off.
                   allow-cracked-on-premium-nicks: false
                   resolver:
                     # Query Mojang API

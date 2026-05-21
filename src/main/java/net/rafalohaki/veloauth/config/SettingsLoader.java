@@ -220,8 +220,6 @@ final class SettingsLoader {
     private static void applyPremiumCoreSettings(Map<String, Object> premium, LoadedState state) {
         Settings.PremiumSettings target = state.premiumSettings;
         target.setCheckEnabled(YamlParserUtils.getBoolean(premium, "check-enabled", target.isCheckEnabled()));
-        target.setOnlineModeNeedAuth(YamlParserUtils.getBoolean(premium,
-                "online-mode-need-auth", target.isOnlineModeNeedAuth()));
         target.setAllowCrackedOnPremiumNicks(YamlParserUtils.getBoolean(premium,
                 "allow-cracked-on-premium-nicks", target.isAllowCrackedOnPremiumNicks()));
     }
@@ -476,7 +474,7 @@ final class SettingsLoader {
         private static void copyPremiumSettings(Settings.PremiumSettings source,
                                                 Settings.PremiumSettings target) {
             target.setCheckEnabled(source.isCheckEnabled());
-            target.setOnlineModeNeedAuth(source.isOnlineModeNeedAuth());
+            target.setAllowCrackedOnPremiumNicks(source.isAllowCrackedOnPremiumNicks());
             target.getResolver().copyFrom(source.getResolver());
         }
 

@@ -44,6 +44,55 @@ VeloAuth is a comprehensive authentication system for Velocity proxy that handle
 
 If you only run a single backend server (Paper/Spigot/Folia) without a proxy, you don't need VeloAuth — use a backend-side auth plugin instead.
 
+## Recommended configuration
+
+VeloAuth ships three sensible operating modes. Pick one based on how strict you want nickname-theft protection to be. All settings live under `premium:` in `plugins/VeloAuth/config.yml`.
+
+### Profile 1 — **Mixed strict** (default, recommended)
+
+```yaml
+premium:
+  check-enabled: true
+  allow-cracked-on-premium-nicks: false
+```
+
+- **What you get:** premium players auto-login with their real Mojang UUID (no `/login` prompt); cracked players go through `/register` + BCrypt; **premium nicknames are reserved** for their Mojang owners.
+- **What you lose:** cracked clients trying to connect with a premium-looking nickname (e.g. someone else's name) are rejected with *"You are not logged into your Minecraft account."*
+- **Use when:** public server accepting both premium and cracked players, where nickname ownership matters.
+
+### Profile 2 — **Cracked-only**
+
+```yaml
+premium:
+  check-enabled: false
+```
+
+- **What you get:** zero HTTP traffic to Mojang/Ashcon, zero writes to `PREMIUM_UUIDS`, every player forced into offline mode with deterministic offline UUID. All registrations go through `/register`.
+- **What you lose:** **premium auto-login is gone for everyone** — even existing premium owners with a `PREMIUMUUID` record will be downgraded to offline UUID. Nickname-theft protection no longer exists; whoever registers a nickname first owns it.
+- **Use when:** cracked-only server, dev/test environment, or any setup where you explicitly don't want Mojang in the loop.
+
+### Profile 3 — **Permissive mixed**
+
+```yaml
+premium:
+  check-enabled: true
+  allow-cracked-on-premium-nicks: true
+```
+
+- **What you get:** existing premium owners (those already in AUTH with `PREMIUMUUID`) keep their premium UUID and skip `/login`. Cracked clients **can** register a premium-looking nickname if it's not yet in the database.
+- **What you lose:** **new premium players connecting for the first time get offline UUIDs permanently** — Velocity's PreLoginEvent has no "try online, fallback offline" mode ([PaperMC/Velocity#1590](https://github.com/PaperMC/Velocity/pull/1590), closed), so VeloAuth must pick one mode per connection. Once a nickname is registered as offline in VeloAuth, the real Mojang owner can no longer take it back automatically — they will hit the nickname-conflict path (`/vauth conflicts`).
+- **Use when:** cracked-first server that wants to accept premium-looking nicknames without kicking anyone, and you accept that new premium owners may lose their premium UUID.
+
+### Quick decision guide
+
+| If you want… | Use profile |
+|---|---|
+| Strongest protection, premium UUIDs preserved | **1 — Mixed strict** |
+| No Mojang contact at all, fully cracked | **2 — Cracked-only** |
+| Accept everyone, premium nicks not reserved | **3 — Permissive mixed** |
+
+There is no profile that "gives premium owners premium UUID *and* lets cracked clients on the same nickname through" — that requires a Velocity API feature that does not exist yet.
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for release-by-release notes, upgrade instructions, and breaking-behavior callouts.

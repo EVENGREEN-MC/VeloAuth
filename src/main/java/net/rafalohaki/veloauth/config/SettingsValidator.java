@@ -110,7 +110,6 @@ public final class SettingsValidator {
     }
 
     static void validatePremium(Settings settings) {
-        warnUnimplementedPremiumOptions(settings);
         warnAllowCrackedOnPremiumNicks(settings);
 
         if (!settings.isPremiumCheckEnabled()) {
@@ -127,17 +126,12 @@ public final class SettingsValidator {
         validatePremiumResolverTtl(resolver);
     }
 
-    private static void warnUnimplementedPremiumOptions(Settings settings) {
-        if (settings.isOnlineModeNeedAuth()) {
-            logger.warn("Config 'premium.online-mode-need-auth' is set but NOT YET IMPLEMENTED. Premium players are not required to authenticate.");
-        }
-        // auth-server.timeout-seconds is now implemented via AuthTimeoutScheduler (P0.2).
-    }
-
     private static void warnAllowCrackedOnPremiumNicks(Settings settings) {
-        if (settings.isAllowCrackedOnPremiumNicks()) {
-            logger.warn("Config 'premium.allow-cracked-on-premium-nicks=true' — VeloAuth will NOT force Mojang auth for premium nicks without a DB record. Cracked clients can register premium nicknames first; nickname-theft protection is reduced.");
+        if (!settings.isAllowCrackedOnPremiumNicks()) {
+            return;
         }
+        logger.warn("Config 'premium.allow-cracked-on-premium-nicks=true' — VeloAuth will NOT force Mojang auth for premium nicks without a DB record. Cracked clients can register premium nicknames first; nickname-theft protection is reduced.");
+        logger.warn("Config 'premium.allow-cracked-on-premium-nicks=true' — New premium players connecting for the first time will get OFFLINE UUIDs permanently (Velocity PreLogin has no 'try online, fallback offline' mode). Existing premium owners with PREMIUMUUID already in AUTH keep their premium UUID.");
     }
 
     private static final int MIN_BCRYPT_COST = 10;
