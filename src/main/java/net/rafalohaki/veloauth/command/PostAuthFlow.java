@@ -75,6 +75,10 @@ final class PostAuthFlow {
                         "{} succeeded for {} but backend transfer failed - rolled back cache/session",
                         operationName, authContext.username());
             }
+            // Re-arm the kick timer so the player doesn't linger on the auth server forever.
+            // Without this they are stuck: authorized→rolled-back but no timeout to eventually
+            // disconnect them and no prompt reminding them to /login again.
+            ctx.plugin().getAuthTimeoutScheduler().schedule(p);
             return false;
         }
         return true;

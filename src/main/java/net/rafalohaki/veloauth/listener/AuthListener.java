@@ -656,7 +656,19 @@ public class AuthListener {
         UUID playerUuid = player.getUniqueId();
         String username = player.getUsername();
 
-        // WERYFIKUJ UUID z bazą danych dla maksymalnego bezpieczeństwa - async, no IO thread blocking
+        // Fast path: auth cache confirms identity (IP + UUID + active session).
+        // This covers both the post-/login transfer and the auto-transfer for returning players.
+        // Skipping the DB UUID round-trip is safe here because the cache was populated by the
+        // plugin itself after successful password verification — an attacker cannot forge it.
+        boolean isAuthorized = authCache.isPlayerAuthorized(playerUuid, playerIp);
+        boolean hasActiveSession = authCache.hasActiveSession(playerUuid, username, playerIp);
+        if (isAuthorized && hasActiveSession) {
+            logger.debug("Authorized player {} heading to {} (fast-path: cache OK)",
+                    player.getUsername(), targetServerName);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        // Slow path: cache miss — verify UUID against DB before allowing backend access.
         return uuidVerificationHandler.verifyPlayerUuid(player)
                 .thenAccept(uuidMatches -> {
                     if (!player.isActive()) {
@@ -664,12 +676,11 @@ public class AuthListener {
                         return;
                     }
 
-                    boolean isAuthorized = authCache.isPlayerAuthorized(playerUuid, playerIp);
-                    boolean hasActiveSession = authCache.hasActiveSession(playerUuid, username, playerIp);
-                    if (!isAuthorized || !hasActiveSession || !uuidMatches) {
-                        handleUnauthorizedConnection(event, player, targetServerName, isAuthorized, hasActiveSession, uuidMatches, playerIp);
+                    boolean isAuthorizedNow = authCache.isPlayerAuthorized(playerUuid, playerIp);
+                    boolean hasActiveSessionNow = authCache.hasActiveSession(playerUuid, username, playerIp);
+                    if (!isAuthorizedNow || !hasActiveSessionNow || !uuidMatches) {
+                        handleUnauthorizedConnection(event, player, targetServerName, isAuthorizedNow, hasActiveSessionNow, uuidMatches, playerIp);
                     } else {
-                        // ✅ WSZYSTKIE WERYFIKACJE PRZESZŁY - POZWÓL
                         logger.debug("Authorized player {} heading to {} (session: OK, UUID: OK)",
                                 player.getUsername(), targetServerName);
                     }
