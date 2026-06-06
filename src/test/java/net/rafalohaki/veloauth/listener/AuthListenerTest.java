@@ -236,6 +236,10 @@ class AuthListenerTest {
 
     @Test
     void testOnServerPreConnect_uuidMismatchShouldDenyAndClearCachedState() {
+        // When the auth cache does NOT already confirm the player, the slow path runs a DB
+        // UUID check. A mismatch on that slow path must still deny access and evict stale state.
+        // (When isAuthorized && hasActiveSession are both true, the fast path allows without a DB
+        // lookup — that case is separately verified by the fast-path tests.)
         String username = "MismatchPlayer";
         UUID playerUuid = UUID.randomUUID();
         String playerIp = "192.0.2.42";
@@ -252,8 +256,9 @@ class AuthListenerTest {
         storedPlayer.setUuid(UUID.randomUUID().toString());
         when(databaseManager.findPlayerByNickname(username))
                 .thenReturn(CompletableFuture.completedFuture(DatabaseManager.DbResult.success(storedPlayer)));
-        when(authCache.isPlayerAuthorized(playerUuid, playerIp)).thenReturn(true);
-        when(authCache.hasActiveSession(playerUuid, username, playerIp)).thenReturn(true);
+        // Player is NOT in auth cache — slow path must run UUID verification
+        when(authCache.isPlayerAuthorized(playerUuid, playerIp)).thenReturn(false);
+        when(authCache.hasActiveSession(playerUuid, username, playerIp)).thenReturn(false);
 
         RegisteredServer backendServer = org.mockito.Mockito.mock(RegisteredServer.class);
         when(backendServer.getServerInfo()).thenReturn(
@@ -268,7 +273,7 @@ class AuthListenerTest {
 
         assertNotNull(task, "Backend UUID verification should be asynchronous");
         awaitEventTask(task);
-        assertFalse(event.getResult().isAllowed(), "UUID mismatch must deny backend access");
+        assertFalse(event.getResult().isAllowed(), "UUID mismatch on slow path must deny backend access");
         verify(authCache, atLeastOnce()).removeAuthorizedPlayer(playerUuid);
         verify(authCache, atLeastOnce()).endSession(playerUuid);
     }

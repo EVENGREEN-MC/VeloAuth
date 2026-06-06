@@ -584,6 +584,10 @@ class AuthenticationFlowIntegrationTest {
 
     @Test
     void testBackendVerification_asyncUuidLookupShouldRecheckAuthorizationState() throws Exception {
+        // Verifies the slow path: when a player is NOT in the auth cache at the time
+        // ServerPreConnectEvent fires, the DB UUID lookup runs asynchronously.  Even if the UUID
+        // matches, the player must still be denied if they are not in the auth cache when the
+        // lookup completes (they never authenticated via /login or /register).
         String username = "AsyncVerification";
         UUID playerUuid = UUID.randomUUID();
         String playerIp = "192.168.1.105";
@@ -597,10 +601,8 @@ class AuthenticationFlowIntegrationTest {
                 connectionManager, databaseManager, messages);
         setPluginInitialized(true);
 
-        CachedAuthUser cachedUser = new CachedAuthUser(
-                playerUuid, username, playerIp, System.currentTimeMillis(), false, null);
-        authCache.addAuthorizedPlayer(playerUuid, cachedUser);
-        authCache.startSession(playerUuid, username, playerIp);
+        // Player is NOT in auth cache — the fast path is skipped and the slow path runs.
+        // (No addAuthorizedPlayer / startSession calls here.)
 
         Player player = mock(Player.class);
         when(player.getUsername()).thenReturn(username);
@@ -619,11 +621,9 @@ class AuthenticationFlowIntegrationTest {
 
         ServerPreConnectEvent event = new ServerPreConnectEvent(player, backendServer, previousServer);
         com.velocitypowered.api.event.EventTask task = authListener.onServerPreConnect(event);
-        assertNotNull(task, "Backend UUID verification should run asynchronously");
+        assertNotNull(task, "Backend UUID verification should run asynchronously on slow path");
 
-        authCache.removeAuthorizedPlayer(playerUuid);
-        authCache.endSession(playerUuid);
-
+        // UUID matches what the player connects with, but they still have no auth cache entry.
         RegisteredPlayer dbPlayer = new RegisteredPlayer();
         dbPlayer.setNickname(username);
         dbPlayer.setUuid(playerUuid.toString());
@@ -632,7 +632,7 @@ class AuthenticationFlowIntegrationTest {
         awaitEventTask(task);
 
         assertFalse(event.getResult().isAllowed(),
-                "Async UUID verification must re-check auth state before allowing backend access");
+                "UUID match alone must not allow access — auth cache must confirm the player authenticated");
     }
 
     private void setPluginInitialized(boolean value) throws Exception {
